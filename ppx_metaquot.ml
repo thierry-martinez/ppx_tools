@@ -56,7 +56,9 @@
 
 *)
 
-module Main : sig end = struct
+module Main : sig
+  val main : unit -> unit
+end = struct
   open Asttypes
   open Parsetree
   open Ast_helper
@@ -70,7 +72,7 @@ module Main : sig end = struct
 
   let append ?loc ?attrs e e' =
     let fn = Location.mknoloc (Longident.(Ldot (Lident "List", "append"))) in
-    Exp.apply ?loc ?attrs (Exp.ident fn) [Asttypes.Nolabel, e; Asttypes.Nolabel, e']
+    Exp.apply ?loc ?attrs (Exp.ident fn) ["", e; "", e']
 
   class exp_builder =
     object
@@ -122,6 +124,46 @@ module Main : sig end = struct
           Location.print_error loc;
         exit 2
 
+  let exp_construct loc txt args =
+    Ast_helper.with_default_loc loc @@ fun () ->
+    match args with
+    | [] -> Ast_helper.Exp.construct { loc; txt } None
+    | [arg] -> Ast_helper.Exp.construct { loc; txt } (Some arg)
+    | _ ->
+        Ast_helper.Exp.construct { loc; txt }
+          (Some (Ast_helper.Exp.tuple args))
+
+  let pat_construct loc txt args =
+    Ast_helper.with_default_loc loc @@ fun () ->
+    match args with
+    | [] -> Ast_helper.Pat.construct { loc; txt } None
+    | [arg] -> Ast_helper.Pat.construct { loc; txt } (Some arg)
+    | _ ->
+        Ast_helper.Pat.construct { loc; txt }
+          (Some (Ast_helper.Pat.tuple args))
+
+  let get_literal_extension ~construct ~none ~loc_exp:_ ~of_payload name attrs
+      arg =
+    match name with
+    | "lit.int" ->
+        Some (construct (Longident.Lident "Const_int") [arg])
+    | "lit.int32" ->
+        Some (construct (Longident.Lident "Const_int32") [arg])
+    | "lit.int64" ->
+        Some (construct (Longident.Lident "Const_int64") [arg])
+    | "lit.char" ->
+        Some (construct (Longident.Lident "Const_char") [arg])
+    | "lit.string" ->
+        let quotation_delimiter =
+          match find_attr_loc "quotation_delimiter" attrs with
+          | Some attr -> of_payload attr.loc attr.txt
+          | None -> none in
+        Some (construct (Longident.Lident "Const_string")
+          [arg; quotation_delimiter])
+    | "lit.float" ->
+        Some (construct (Longident.Lident "Const_float") [arg])
+    | _ -> None
+
   let exp_lifter loc map =
     let map = map.Ast_mapper.expr map in
     object
@@ -132,9 +174,29 @@ module Main : sig end = struct
       method! lift_Location_t _ = loc
 
       (* Support for antiquotations *)
-      method! lift_Parsetree_expression = function
+      method! lift_Parsetree_expression x =
+        let loc_exp = loc in
+        match x with
         | {pexp_desc=Pexp_extension({txt="e";loc}, e); _} -> map (get_exp loc e)
-        | x -> super # lift_Parsetree_expression x
+        | {pexp_desc=Pexp_extension({txt;loc}, e); pexp_attributes; _} ->
+            begin match
+              get_literal_extension txt pexp_attributes (get_exp loc e)
+                ~construct:(exp_construct loc)
+                ~none:(exp_construct loc (Lident "None") []) ~loc_exp
+                ~of_payload:get_exp
+            with
+            | Some e ->
+                let e = Ast_helper.Exp.record [
+                  { loc;
+                    txt = Longident.Ldot (Lident "Parsetree", "pexp_desc") },
+                  exp_construct loc (Lident "Pexp_constant") [e];
+                  { loc; txt = Lident "pexp_loc" }, loc_exp;
+                  { loc; txt = Lident "pexp_attributes" },
+                  exp_construct loc (Lident "[]") []] None in
+                map e
+            | _ -> super # lift_Parsetree_expression x
+            end
+        | _ -> super # lift_Parsetree_expression x
 
       method! lift_Parsetree_pattern = function
         | {ppat_desc=Ppat_extension({txt="p";loc}, e); _} -> map (get_exp loc e)
@@ -165,8 +227,25 @@ module Main : sig end = struct
       method! lift_Parsetree_attributes _ = Pat.any ()
 
       (* Support for antiquotations *)
-      method! lift_Parsetree_expression = function
+      method! lift_Parsetree_expression x =
+        match x with
         | {pexp_desc=Pexp_extension({txt="e";loc}, e); _} -> map (get_pat loc e)
+        | {pexp_desc=Pexp_extension({txt;loc}, e); pexp_attributes; _} ->
+            begin match
+              get_literal_extension txt pexp_attributes (get_pat loc e)
+                ~construct:(pat_construct loc)
+                ~none:(Ast_helper.Pat.any ~loc ())
+                ~loc_exp:(Ast_helper.Pat.any ~loc ())
+                ~of_payload:get_pat
+            with
+            | Some e ->
+                let e = Ast_helper.Pat.record [
+                  { loc;
+                    txt = Longident.Ldot (Lident "Parsetree", "pexp_desc") },
+                  pat_construct loc (Lident "Pexp_constant") [e]] Open in
+                map e
+            | _ -> super # lift_Parsetree_expression x
+            end
         | x -> super # lift_Parsetree_expression x
 
       method! lift_Parsetree_pattern = function
@@ -242,5 +321,5 @@ module Main : sig end = struct
     in
     {super with expr; pat; structure; structure_item}
 
-  let () = Ast_mapper.run_main expander
+  let main () = Ast_mapper.run_main expander
 end
