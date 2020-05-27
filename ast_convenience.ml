@@ -109,6 +109,12 @@ let find_attr s attrs =
   try Some (snd (List.find (fun (x, _) -> x.txt = s) attrs))
   with Not_found -> None
 
+let find_attr_loc s attrs =
+  match List.find (fun (attr_name, _) -> attr_name.txt = s) attrs with
+  | exception Not_found -> None
+  | (attr_name, payload) ->
+      Some { Location.txt = payload; loc = attr_name.loc }
+
 let expr_of_payload = function
   | PStr [{pstr_desc=Pstr_eval(e, _); _}] -> Some e
   | _ -> None
